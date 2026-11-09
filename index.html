@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Piano Hero</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            background-color: #0d0e15;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #game-container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            border-radius: 12px;
+            overflow: hidden;
+            background: #12131C;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+</div>
+
+<script>
+// --- AUDIO SYNTHESIZER (Web Audio API) ---
+class AudioEngine {
+    constructor() {
+        this.ctx = null;
+    }
+
+    init() {
+        if (!this.ctx) {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+    }
+
+    midiToFreq(midi) {
+        return 440 * Math.pow(2, (midi - 69) / 12);
+    }
+
+    playNote(pitch, duration = 0.4) {
+        if (!this.ctx) return;
+        
+        try {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(this.midiToFreq(pitch), this.ctx.currentTime);
+            
+            const now = this.ctx.currentTime;
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+            
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            
+            osc.start(now);
+            osc.stop(now + duration);
+        } catch (e) {
+            console.error(e);
+        }
+    }
+}
+
+// --- DATA STRUCTURES & CONSTANTS ---
+const States = { TITLE: 0, MENU: 1, PLAYING: 2, PAUSED: 3, RESULTS: 4 };
+
+const Difficulties = [
+    { label: "Fácil", lanes: 3, speed: 450, windowScale: 1.2, keys: ["F", "G", "H"] },
+    { label: "Médio", lanes: 4, speed: 520, windowScale: 1.0, keys: ["D", "F", "G", "H"] },
+    { label: "Difícil", lanes: 5, speed: 600, windowScale: 0.85, keys: ["D", "F", "G", "H", "J"] }
+];
+
+const LaneColors = ['#FF4757', '#2ED573', '#1E90FF', '#FFA502', '#9B59B6'];
+
+const Songs = [
+    {
+        title: "Brilha, Brilha Estrelinha",
+        composer: "Tradicional",
+        bpm: 100,
+        data: "C4 C4 G4 G4 A4 A4 G4:2 F4 F4 E4 E4 D4 D4 C4:2 G4 G4 F4 F4 E4 E4 D4:2 G4 G4 F4 F4 E4 E4 D4:2 C4 C4 G4 G4 A4 A4 G4:2 F4 F4 E4 E4 D4 D4 C4:2"
+    },
+    {
+        title: "Ode à Alegria",
+        composer: "L. v. Beethoven",
+        bpm: 120,
+        data: "E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 E4:1.5 D4:0.5 D4:2 E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 D4:1.5 C4:0.5 C4:2 D4 D4 E4 C4 D4 E4:0.5 F4:0.5 E4 C4 D4 E4:0.5 F4:0.5 E4 D4 C4 D4 G3:2 E4 E4 F4 G4 G4 F4 E4 D4 C4 C4 D4 E4 D4:1.5 C4:0.5 C4:2"
+    },
+    {
+        title: "Für Elise",
+        composer: "W. A. Mozart",
+        bpm: 130,
+        data: "E5:.25 D#5:.25 E5:.25 D#5:.25 E5:.25 B4:.25 D5:.25 C5:.25 A4:.5 R:.25 C4:.25 E4:.25 A4:.25 B4:.5 R:.25 E4:.25 G#4:.25 B4:.25 C5:.5 R:.25 E4:.25 E5:.25 D#5:.25 E5:.25 D#5:.25 E5:.25 B4:.25 D5:.25 C5:.25 A4:.5 R:.25 C4:.25 E4:.25 A4:.25 B4:.5 R:.25 E4:.25 C5:.25 B4:.25 A4:.5"
+    },
+    {
+        title: "Marcha Turca",
+        composer: "W. A. Mozart",
+        bpm: 140,
+        data: "B4:.5 A4:.5 G#4:.5 A4:.5 C5 R D5:.5 C5:.5 B4:.5 C5:.5 E5 R F5:.5 E5:.5 D#5:.5 E5:.5 B5:.5 A5:.5 G#5:.5 A5:.5 B5:.5 A5:.5 G#5:.5 A5:.5 C6:2 A5 C6 B5 A5 G5 A5 B5 A5 G5 A5 B5 A5 G5 F#5 E5:2"
+    }
+];
+
+// --- NOTE PARSER (Pitch to Lane & Midi) ---
+const NOTE_MAP = { 'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11 };
+
+function parseNote(str) {
+    if (str.startsWith('R')) return { isRest: true };
+    const regex = /^([A-G])([#b]?)(d?):?(d*.?d*)?/;
+    const match = str.match(/^([A-G])([#b]?)(d+)?(?::(d*.?d*))?/);
+    if (!match) return null;
+
+    let [, name, accidental, octave, dur] = match;
+    octave = octave ? parseInt(octave) : 4;
+    dur = dur ? parseFloat(dur) : 1.0;
+
+    let semitone = NOTE_MAP[name];
+    if (accidental === '#') semitone += 1;
+    if (accidental === 'b') semitone -= 1;
+
+    const midi = (octave + 1) * 12 + semitone;
+    return { isRest: false, pitch: midi, duration: dur };
+}
+
+function buildChart(song, diff) {
+    const tokens = song.data.trim().split(/\s+/);
+    const beatSec = 60.0 / song.bpm;
+    let currentTime = 2.0; // Lead-in delay
+    const notes = [];
+
+    tokens.forEach(tok => {
+        const parsed = parseNote(tok);
+        if (!parsed) return;
+        
+        const dur = parsed.duration * beatSec;
+        if (!parsed.isRest) {
+            notes.push({
+                time: currentTime,
+                dur: dur,
+                pitch: parsed.pitch,
+                lane: 0,
+                hit: false,
+                missed: false
+            });
+        }
+        currentTime += dur;
+    });
+
+    // Mapeamento de Pistas proporcional
+    if (notes.length > 0) {
+        const pitches = [...new Set(notes.map(n => n.pitch))].sort((a,b) => a - b);
+        notes.forEach(n => {
+            let rank = pitches.indexOf(n.pitch);
+            n.lane = Math.min(diff.lanes - 1, Math.floor((rank / pitches.length) * diff.lanes));
+        });
+    }
+
+    return { notes, endTime: currentTime + 1.5 };
+}
+
+// --- MAIN GAME CLASS ---
+class PianoHero {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.audio = new AudioEngine();
+
+        this.state = States.TITLE;
+        this.songIdx = 0;
+        this.diffIdx = 0;
+
+        // Propriedades do Jogo
+        this.notes = [];
+        this.songEndTime = 0;
+        this.startTime = 0;
+        this.pauseTime = 0;
+
+        // Stats
+        this.score = 0;
+        this.combo = 0;
+        this.maxCombo = 0;
+        this.perfects = 0;
+        this.goods = 0;
+        this.oks = 0;
+        this.misses = 0;
+        this.accSum = 0;
+        this.newRecord = false;
+
+        // Feedback Visual
+        this.judgeText = "";
+        this.judgeColor = "#FFF";
+        this.judgeAge = 0;
+        this.laneFlash = [0, 0, 0, 0, 0];
+        this.particles = [];
+
+        this.initInput();
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+    }
+
+    get diff() { return Difficulties[this.diffIdx]; }
+    get currentSong() { return Songs[this.songIdx]; }
+
+    initInput() {
+        window.addEventListener('keydown', (e) => {
+            this.audio.init();
+            const key = e.key.toUpperCase();
+
+            if (this.state === States.TITLE) {
+                if (key === 'ENTER') this.state = States.MENU;
+            } 
+            else if (this.state === States.MENU) {
+                if (key === 'ARROWUP') this.songIdx = (this.songIdx - 1 + Songs.length) % Songs.length;
+                if (key === 'ARROWDOWN') this.songIdx = (this.songIdx + 1) % Songs.length;
+                if (key === 'ARROWLEFT') this.diffIdx = (this.diffIdx - 1 + Difficulties.length) % Difficulties.length;
+                if (key === 'ARROWRIGHT') this.diffIdx = (this.diffIdx + 1) % Difficulties.length;
+                if (key === 'ENTER') this.startSong();
+            } 
+            else if (this.state === States.PLAYING) {
+                if (key === 'ESCAPE' || key === 'P' || key === ' ') {
+                    this.state = States.PAUSED;
+                    this.pauseTime = performance.now();
+                    return;
+                }
+                const lane = this.diff.keys.indexOf(key);
+                if (lane !== -1) this.handleHit(lane);
+            } 
+            else if (this.state === States.PAUSED) {
+                if (key === 'ESCAPE') this.state = States.MENU;
+                if (key === 'R') this.startSong();
+                if (key === 'P' || key === ' ' || key === 'ENTER') {
+                    this.startTime += (performance.now() - this.pauseTime);
+                    this.state = States.PLAYING;
+                }
+            } 
+            else if (this.state === States.RESULTS) {
+                if (key === 'R') this.startSong();
+                if (key === 'ENTER' || key === 'ESCAPE') this.state = States.MENU;
+            }
+        });
+    }
+
+    startSong() {
+        const chart = buildChart(this.currentSong, this.diff);
+        this.notes = chart.notes;
+        this.songEndTime = chart.endTime;
+        this.startTime = performance.now();
+        
+        this.score = 0;
+        this.combo = 0;
+        this.maxCombo = 0;
+        this.perfects = 0;
+        this.goods = 0;
+        this.oks = 0;
+        this.misses = 0;
+        this.accSum = 0;
+        this.newRecord = false;
+        
+        this.judgeText = "";
+        this.particles = [];
+        this.state = States.PLAYING;
+    }
+
+    handleHit(lane) {
+        this.laneFlash[lane] = 1.0;
+        const songTime = (performance.now() - this.startTime) / 1000.0;
+        
+        // Janelas de tempo (em segundos)
+        const scale = this.diff.windowScale;
+        const pWin = 0.045 * scale;
+        const gWin = 0.090 * scale;
+        const oWin = 0.135 * scale;
+
+        let candidate = null;
+        let minDiff = Infinity;
+
+        for (let note of this.notes) {
+            if (note.lane === lane && !note.hit && !note.missed) {
+                let diff = Math.abs(note.time - songTime);
+                if (diff <= oWin && diff < minDiff) {
+                    minDiff = diff;
+                    candidate = note;
+                }
+            }
+        }
+
+        if (candidate) {
+            candidate.hit = true;
+            this.audio.playNote(candidate.pitch, candidate.dur);
+
+            if (minDiff <= pWin) {
+                this.triggerJudgement("PERFEITO!", "#2ED573", 100, 1.0);
+                this.perfects++;
+            } else if (minDiff <= gWin) {
+                this.triggerJudgement("BOM", "#1E90FF", 80, 0.8);
+                this.goods++;
+            } else {
+                this.triggerJudgement("OK", "#FFA502", 50, 0.5);
+                this.oks++;
+            }
+            
+            this.combo++;
+            if (this.combo > this.maxCombo) this.maxCombo = this.combo;
+            
+            const mult = 1 + Math.floor(this.combo / 10) * 0.1;
+            this.score += Math.floor(100 * mult);
+            this.spawnParticles(lane);
+        }
+    }
+
+    triggerJudgement(text, color, acc, flashIntensity) {
+        this.judgeText = text;
+        this.judgeColor = color;
+        this.judgeAge = 0;
+        this.accSum += acc;
+    }
+
+    spawnParticles(lane) {
+        const laneW = 400 / this.diff.lanes;
+        const startX = 200 + lane * laneW + laneW / 2;
+        const startY = 500;
+
+        for (let i = 0; i < 15; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = Math.random() * 4 + 2;
+            this.particles.push({
+                x: startX,
+                y: startY,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                life: 1.0,
+                color: LaneColors[lane]
+            });
+        }
+    }
+
+    getHighScoreKey() {
+        return `hs_${this.currentSong.title}_${this.diff.label}`;
+    }
+
+    finishGame() {
+        this.state = States.RESULTS;
+        const key = this.getHighScoreKey();
+        const currentHS = parseInt(localStorage.getItem(key) || "0");
+        if (this.score > currentHS) {
+            localStorage.setItem(key, this.score.toString());
+            this.newRecord = true;
+        }
+    }
+
+    // --- GAME LOOP & RENDER ---
+    loop() {
+        this.update();
+        this.render();
+        requestAnimationFrame(this.loop);
+    }
+
+    update() {
+        const dt = 1 / 60;
+        
+        // Efeitos visuais
+        this.judgeAge += dt;
+        for (let i = 0; i < 5; i++) {
+            this.laneFlash[i] = Math.max(0, this.laneFlash[i] - dt * 4);
+        }
+
+        // Partículas
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            let p = this.particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= dt * 2;
+            if (p.life <= 0) this.particles.splice(i, 1);
+        }
+
+        if (this.state === States.PLAYING) {
+            const songTime = (performance.now() - this.startTime) / 1000.0;
+
+            // Checar Erros (Misses)
+            const scale = this.diff.windowScale;
+            const oWin = 0.135 * scale;
+            
+            for (let note of this.notes) {
+                if (!note.hit && !note.missed && songTime > note.time + oWin) {
+                    note.missed = true;
+                    this.combo = 0;
+                    this.misses++;
+                    this.triggerJudgement("ERROU", "#FF4757", 0, 0);
+                }
+            }
+
+            if (songTime >= this.songEndTime) {
+                this.finishGame();
+            }
+        }
+    }
+
+    render() {
+        this.ctx.fillStyle = "#12131C";
+        this.ctx.fillRect(0, 0, 800, 600);
+
+        if (this.state === States.TITLE) this.drawTitle();
+        else if (this.state === States.MENU) this.drawMenu();
+        else if (this.state === States.PLAYING) this.drawGame();
+        else if (this.state === States.PAUSED) { this.drawGame(); this.drawPauseOverlay(); }
+        else if (this.state === States.RESULTS) this.drawResults();
+    }
+
+    drawTitle() {
+        const ctx = this.ctx;
+        ctx.textAlign = "center";
+        
+        ctx.fillStyle = "#2ED573";
+        ctx.font = "bold 56px sans-serif";
+        ctx.fillText("PIANO HERO", 400, 220);
+
+        ctx.fillStyle = "#A4B0BE";
+        ctx.font = "20px sans-serif";
+        ctx.fillText("Sinta o ritmo. Acerte cada nota.", 400, 270);
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "22px sans-serif";
+        ctx.fillText("Pressione ENTER para começar", 400, 420);
+    }
+
+    drawMenu() {
+        const ctx = this.ctx;
+        ctx.textAlign = "center";
+
+        ctx.fillStyle = "#2ED573";
+        ctx.font = "bold 36px sans-serif";
+        ctx.fillText("SELEÇÃO DE MÚSICA", 400, 80);
+
+        // Card da Música
+        ctx.fillStyle = "#1E272E";
+        ctx.fillRect(150, 130, 500, 260);
+        ctx.strokeStyle = "#2ED573";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(150, 130, 500, 260);
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "bold 28px sans-serif";
+        ctx.fillText(this.currentSong.title, 400, 180);
+
+        ctx.fillStyle = "#CED6E0";
+        ctx.font = "18px sans-serif";
+        ctx.fillText(`Compositor: ${this.currentSong.composer}`, 400, 220);
+        ctx.fillText(`BPM: ${this.currentSong.bpm}`, 400, 250);
+
+        ctx.fillStyle = "#FFA502";
+        ctx.font = "bold 22px sans-serif";
+        ctx.fillText(`Dificuldade: < ${this.diff.label.toUpperCase()} >`, 400, 310);
+
+        ctx.fillStyle = "#747D8C";
+        ctx.font = "16px sans-serif";
+        ctx.fillText(`Teclas: ${this.diff.keys.join("  ")}`, 400, 345);
+
+        // Recorde
+        const hs = localStorage.getItem(this.getHighScoreKey()) || 0;
+        ctx.fillStyle = "#2ED573";
+        ctx.font = "bold 18px sans-serif";
+        ctx.fillText(`Recorde Local: ${hs} pts`, 400, 430);
+
+        // Controles
+        ctx.fillStyle = "#A4B0BE";
+        ctx.font = "16px sans-serif";
+        ctx.fillText("↑/↓ : Escolher Música   |   ←/→ : Alterar Dificuldade", 400, 500);
+        ctx.fillText("Pressione ENTER para Jogar", 400, 540);
+    }
+
+    drawGame() {
+        const ctx = this.ctx;
+        const songTime = (performance.now() - this.startTime) / 1000.0;
+        const laneW = 400 / this.diff.lanes;
+        const boardX = 200;
+
+        // Desenhar Pistas
+        for (let i = 0; i < this.diff.lanes; i++) {
+            const x = boardX + i * laneW;
+            ctx.fillStyle = "#1E272E";
+            ctx.fillRect(x, 0, laneW, 600);
+            
+            // Divisores de Pistas
+            ctx.strokeStyle = "#2C3A47";
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x, 0, laneW, 600);
+
+            // Flash da Tecla Apressada
+            if (this.laneFlash[i] > 0) {
+                ctx.fillStyle = LaneColors[i];
+                ctx.globalAlpha = this.laneFlash[i] * 0.4;
+                ctx.fillRect(x, 0, laneW, 600);
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        // Linha de Acerto (Hit Bar)
+        const hitY = 500;
+        ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
+        ctx.fillRect(boardX, hitY - 10, 400, 20);
+        ctx.strokeStyle = "#FFFFFF";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(boardX, hitY);
+        ctx.lineTo(boardX + 400, hitY);
+        ctx.stroke();
+
+        // Notas em Queda
+        for (let note of this.notes) {
+            if (note.hit) continue;
+            
+            const timeDiff = note.time - songTime;
+            const y = hitY - timeDiff * this.diff.speed;
+            
+            // Só desenhar se estiver visível na tela
+            if (y > -50 && y < 650) {
+                const x = boardX + note.lane * laneW + 5;
+                const h = Math.max(25, note.dur * this.diff.speed);
+
+                ctx.fillStyle = note.missed ? "#747D8C" : LaneColors[note.lane];
+                ctx.beginPath();
+                ctx.roundRect(x, y - h, laneW - 10, h, 8);
+                ctx.fill();
+                
+                ctx.strokeStyle = "#FFFFFF";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        // Desenhar Teclas Base
+        for (let i = 0; i < this.diff.lanes; i++) {
+            const x = boardX + i * laneW + 5;
+            ctx.fillStyle = this.laneFlash[i] > 0 ? LaneColors[i] : "#2C3A47";
+            ctx.beginPath();
+            ctx.roundRect(x, 525, laneW - 10, 45, 6);
+            ctx.fill();
+
+            ctx.fillStyle = "#FFFFFF";
+            ctx.font = "bold 20px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(this.diff.keys[i], boardX + i * laneW + laneW / 2, 555);
+        }
+
+        // Partículas de Acerto
+        for (let p of this.particles) {
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = Math.max(0, p.life);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+        }
+
+        // Interface HUD (Pontuação & Combo)
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "bold 20px sans-serif";
+        ctx.fillText(`Pontos: ${this.score}`, 20, 40);
+        ctx.fillText(`Combo: ${this.combo}`, 20, 75);
+
+        const totalProcessed = this.perfects + this.goods + this.oks + this.misses;
+        const acc = totalProcessed > 0 ? (this.accSum / totalProcessed) : 100;
+        ctx.fillText(`Precisão: ${acc.toFixed(1)}%`, 20, 110);
+
+        // Feedback Text (PERFEITO, BOM, ERROU)
+        if (this.judgeText && this.judgeAge < 0.8) {
+            ctx.textAlign = "center";
+            ctx.fillStyle = this.judgeColor;
+            ctx.font = "bold 32px sans-serif";
+            ctx.fillText(this.judgeText, 400, 450);
+        }
+    }
+
+    drawPauseOverlay() {
+        const ctx = this.ctx;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+        ctx.fillRect(0, 0, 800, 600);
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#FFA502";
+        ctx.font = "bold 48px sans-serif";
+        ctx.fillText("PAUSADO", 400, 240);
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "20px sans-serif";
+        ctx.fillText("P / ESPAÇO / ENTER : Continuar", 400, 310);
+        ctx.fillText("R : Reiniciar Música", 400, 350);
+        ctx.fillText("ESC : Voltar ao Menu", 400, 390);
+    }
+
+    drawResults() {
+        const ctx = this.ctx;
+        ctx.textAlign = "center";
+
+        ctx.fillStyle = "#2ED573";
+        ctx.font = "bold 42px sans-serif";
+        ctx.fillText("RESULTADO FINAL", 400, 100);
+
+        if (this.newRecord) {
+            ctx.fillStyle = "#FFA502";
+            ctx.font = "bold 22px sans-serif";
+            ctx.fillText("★ NOVO RECORDE! ★", 400, 140);
+        }
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "bold 32px sans-serif";
+        ctx.fillText(`${this.score} Pontos`, 400, 200);
+
+        const total = this.perfects + this.goods + this.oks + this.misses;
+        const acc = total > 0 ? (this.accSum / total) : 0;
+
+        ctx.font = "18px sans-serif";
+        ctx.fillStyle = "#CED6E0";
+        ctx.fillText(`Precisão: ${acc.toFixed(1)}%`, 400, 250);
+        ctx.fillText(`Combo Máximo: ${this.maxCombo}`, 400, 280);
+        
+        ctx.fillStyle = "#2ED573"; ctx.fillText(`Perfeito: ${this.perfects}`, 400, 320);
+        ctx.fillStyle = "#1E90FF"; ctx.fillText(`Bom: ${this.goods}`, 400, 350);
+        ctx.fillStyle = "#FFA502"; ctx.fillText(`OK: ${this.oks}`, 400, 380);
+        ctx.fillStyle = "#FF4757"; ctx.fillText(`Erros: ${this.misses}`, 400, 410);
+
+        ctx.fillStyle = "#A4B0BE";
+        ctx.font = "18px sans-serif";
+        ctx.fillText("R: Jogar Novamente   |   ENTER: Voltar ao Menu", 400, 500);
+    }
+}
+
+// Iniciar o jogo quando a página carregar
+window.onload = () => {
+    new PianoHero();
+};
+</script>
+
+</body>
+</html>
